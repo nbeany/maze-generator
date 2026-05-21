@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Maze — Build &amp; Solve</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: #0f0f0f;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    font-family: 'Courier New', monospace;
+    color: #e0e0e0;
+    gap: 20px;
+    padding: 20px;
+  }
+
+  h1 {
+    font-size: 13px;
+    letter-spacing: 0.25em;
+    text-transform: uppercase;
+    color: #555;
+    font-weight: normal;
+  }
+
+  #canvas { display: block; }
+
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+
+  .field {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    letter-spacing: 0.1em;
+    color: #666;
+  }
+
+  .field input[type="number"] {
+    width: 52px;
+    background: #1a1a1a;
+    border: 1px solid #333;
+    color: #e0e0e0;
+    font-family: 'Courier New', monospace;
+    font-size: 13px;
+    padding: 5px 8px;
+    text-align: center;
+    outline: none;
+    border-radius: 3px;
+  }
+  .field input[type="number"]:focus { border-color: #888; }
+  .field label { text-transform: uppercase; }
+
+  button {
+    background: transparent;
+    border: 1px solid #444;
+    color: #ccc;
+    font-family: 'Courier New', monospace;
+    font-size: 12px;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    padding: 7px 18px;
+    cursor: pointer;
+    border-radius: 3px;
+    transition: border-color 0.15s, color 0.15s, background 0.15s;
+  }
+  button:hover  { border-color: #aaa; color: #fff; }
+  button:active { opacity: 0.7; }
+  button.active { background: #2a2a2a; border-color: #888; color: #fff; }
+  button:disabled { opacity: 0.3; cursor: default; border-color: #333; color: #555; }
+
+  #status {
+    font-size: 11px;
+    letter-spacing: 0.2em;
+    color: #444;
+    text-transform: uppercase;
+    min-height: 16px;
+  }
+</style>
+</head>
+<body>
+
+<h1>Maze — Build &amp; Solve</h1>
+<canvas id="canvas"></canvas>
+
+<div class="controls">
+  <div class="field">
+    <label for="inp-r">Rows</label>
+    <input type="number" id="inp-r" value="15" min="3" max="40" />
+  </div>
+  <div class="field">
+    <label for="inp-c">Cols</label>
+    <input type="number" id="inp-c" value="20" min="3" max="60" />
+  </div>
+  <div class="field">
+    <label for="inp-speed">Speed</label>
+    <input type="number" id="inp-speed" value="3" min="1" max="20" title="Steps per frame" />
+  </div>
+  <button id="btn-cycles">Cycles: OFF</button>
+  <button id="btn-generate">Generate</button>
+  <button id="btn-solve" disabled>Solve</button>
+</div>
+
+<div id="status">press generate to begin</div>
+
+<script>
+// ─── constants ────────────────────────────────────────────────────────────────
+const CELL   = 32;
+const WALL_W = 2;
+const PAD    = 28;
+
+const C_BG        = '#0f0f0f';
+const C_WALL      = '#d4d4d4';
+const C_VISITED   = '#1a1a2e';  // generator: visited cell fill
+const C_STACK_GEN = '#1e3a5f';  // generator: cells on the DFS stack
+
+const C_PATH      = '#1a3a2e';  // solver: current live path (on stack)
+const C_DEAD      = '#2a1a1a';  // solver: dead-end cells (backtracked)
+const C_SOLVER    = '#e84545';  // solver: mouse dot (red)
+const C_SOLUTION  = '#f0a500';  // solver: final solution trail (amber)
+
+const C_START     = '#22c55e';
+const C_END       = '#e84545';
+
+// ─── shared state ─────────────────────────────────────────────────────────────
+let R, C, cellSize;
+
+// MAZE DATA STRUCTURE:
+// northWall[row][col] = 1 indicates the top wall of cell (row, col) is intact.
+// eastWall[row][col]  = 1 indicates the right wall of cell (row, col) is intact.
+// Arrays are dimensioned (R+1) x (C+1) to include:
+// - Row 0: A phantom row representing the bottom boundary of the maze.
+// - Col 0: A phantom column representing the left boundary of the maze.
+let northWall, eastWall;
+
+// generator state
+let genVisited;
+let genStack;
+let genRow, genCol;
+let genDone = false;
+
+// solver state
+let solverActive  = false;
+let solverDone    = false;
+let solverRow, solverCol;
+let solverStack;       // stack of {row,col} — the current live path
+let deadCells;         // Set of "row,col" strings — confirmed dead ends
+let solutionPath;      // filled when the exit is reached
+
+// openings
+let startRow, endRow;
+
+let animId = null;
+let enableCycles = false;
+
+// ─── DOM ──────────────────────────────────────────────────────────────────────
+const canvas   = document.getElementById('canvas');
+const ctx      = canvas.getContext('2d');
+const btnGen   = document.getElementById('btn-generate');
+const btnSolve = document.getElementById('btn-solve');
+const inpR     = document.getElementById('inp-r');
+const inpC     = document.getElementById('inp-c');
+const inpSpeed = document.getElementById('inp-speed');
+const statusEl = document.getElementById('status');
+const btnCycles = document.getElementById('btn-cycles');
+
+// ─── utilities ────────────────────────────────────────────────────────────────
+
+function grid2d(rows, cols, val) {
+  return Array.from({ length: rows }, () => new Array(cols).fill(val));
+}
+
+function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+// top-left pixel corner of cell (row, col); row 1 = top of maze
+function cellOrigin(row, col) {
+  return {
+    x: PAD + (col - 1) * cellSize,
+    y: PAD + (R - row) * cellSize,
+  };
+}
+
+// ─── maze init ────────────────────────────────────────────────────────────────
+
+function initMaze(rows, cols) {
+  R = rows;
+  C = cols;
+
+  const maxW = Math.min(window.innerWidth  - 48, 900);
+  const maxH = Math.min(window.innerHeight - 220, 700);
+  cellSize   = Math.max(10, Math.min(CELL, Math.floor(maxW / C), Math.floor(maxH / R)));
+
+  canvas.width  = PAD * 2 + C * cellSize;
+  canvas.height = PAD * 2 + R * cellSize;
+
+  // all walls intact; arrays are (R+1)×(C+1) for phantom row/col
+  northWall  = grid2d(R + 1, C + 1, 1);
+  eastWall   = grid2d(R + 1, C + 1, 1);
+  genVisited = grid2d(R + 1, C + 1, false);
+
+  genRow = Math.ceil(Math.random() * R);
+  genCol = Math.ceil(Math.random() * C);
+  genVisited[genRow][genCol] = true;
+
+  genStack = [];
+  genDone  = false;
+
+  // pick distinct start/end rows; walls opened after generation
+  startRow = Math.ceil(Math.random() * R);
+  do { endRow = Math.ceil(Math.random() * R); } while (endRow === startRow);
+
+  // reset solver
+  solverActive  = false;
+  solverDone    = false;
+  solutionPath  = null;
+}
+
+// ─── wall helpers ─────────────────────────────────────────────────────────────
+
+function eatWall(fr, fc, tr, tc) {
+  if      (tr === fr + 1) northWall[fr][fc] = 0;  // north
+  else if (tr === fr - 1) northWall[tr][tc] = 0;  // south
+  else if (tc === fc + 1) eastWall[fr][fc]  = 0;  // east
+  else if (tc === fc - 1) eastWall[tr][tc]  = 0;  // west
+}
+
+// Can the solver move from (r,c) in direction (dr,dc)?
+// Returns true when the shared wall is absent.
+function canMove(r, c, dr, dc) {
+  const tr = r + dr, tc = c + dc;
+  if (tr < 1 || tr > R || tc < 1 || tc > C) return false;
+  if (dr ===  1) return northWall[r][c]   === 0;  // north: own north wall
+  if (dr === -1) return northWall[tr][tc] === 0;  // south: neighbour's north wall
+  if (dc ===  1) return eastWall[r][c]    === 0;  // east:  own east wall
+  if (dc === -1) return eastWall[tr][tc]  === 0;  // west:  neighbour's east wall
+  return false;
+}
+
+// ─── generator step ───────────────────────────────────────────────────────────
+
+function unvisitedNeighbours(row, col) {
+  return shuffle([
+    { row: row + 1, col },
+    { row: row - 1, col },
+    { row,          col: col + 1 },
+    { row,          col: col - 1 },
+  ]).filter(n =>
+    n.row >= 1 && n.row <= R &&
+    n.col >= 1 && n.col <= C &&
+    !genVisited[n.row][n.col]
+  );
+}
+
+// Returns true while work remains.
+function stepGenerator() {
+  const nbrs = unvisitedNeighbours(genRow, genCol);
+
+  if (nbrs.length > 0) {
+    genStack.push({ row: genRow, col: genCol });
+    const chosen = nbrs[0];
+    for (let i = 1; i < nbrs.length; i++) genStack.push(nbrs[i]);
+    eatWall(genRow, genCol, chosen.row, chosen.col);
+    genRow = chosen.row;
+    genCol = chosen.col;
+    genVisited[genRow][genCol] = true;
+
+    if (enableCycles && Math.random() < 0.05) {
+      const dirs = [{dr: 1, dc: 0}, {dr: -1, dc: 0}, {dr: 0, dc: 1}, {dr: 0, dc: -1}];
+      const rndDir = dirs[Math.floor(Math.random() * 4)];
+      const tr = genRow + rndDir.dr, tc = genCol + rndDir.dc;
+      if (tr >= 1 && tr <= R && tc >= 1 && tc <= C) {
+        eatWall(genRow, genCol, tr, tc);
+      }
+    }
+
+  } else if (genStack.length > 0) {
+    let next;
+    do { next = genStack.pop(); }
+    while (next && genVisited[next.row][next.col] && genStack.length > 0);
+
+    if (next && !genVisited[next.row][next.col]) {
+      const vn = [
+        { row: next.row + 1, col: next.col },
+        { row: next.row - 1, col: next.col },
+        { row: next.row,     col: next.col + 1 },
+        { row: next.row,     col: next.col - 1 },
+      ].find(n =>
+        n.row >= 1 && n.row <= R &&
+        n.col >= 1 && n.col <= C &&
+        genVisited[n.row][n.col]
+      );
+      if (vn) eatWall(vn.row, vn.col, next.row, next.col);
+      genRow = next.row;
+      genCol = next.col;
+      genVisited[genRow][genCol] = true;
+    }
+  } else {
+    return false;
+  }
+  return true;
+}
+
+// ─── entry / exit openings ────────────────────────────────────────────────────
+//   Left  edge: eastWall[startRow][0] = 0  (west wall of col-1 cell)
+//   Right edge: eastWall[endRow][C]   = 0  (east wall of col-C cell)
+
+function openExits() {
+  eastWall[startRow][0] = 0;
+  eastWall[endRow][C]   = 0;
+}
+
+// ─── solver init ──────────────────────────────────────────────────────────────
+
+function initSolver() {
+  // Start the solver mouse at the entry cell (col 1, startRow)
+  solverRow    = startRow;
+  solverCol    = 1;
+  solverStack  = [{ row: solverRow, col: solverCol }];
+  deadCells    = new Set();
+  solverDone   = false;
+  solutionPath = null;
+  solverActive = true;
+}
+
+// ─── solver step ──────────────────────────────────────────────────────────────
+// The backtracking algorithm:
+//   1. Collect open, unvisited, non-dead neighbours (random order).
+//   2. If any exist → push current position, move to a random one.
+//   3. If none exist → dead end: mark current cell blue, pop stack to backtrack.
+//   4. If we reach (endRow, C) → solved.
+//
+// "Visited" for the solver means "currently on the live path stack".
+// We track this via a Set for O(1) lookup.
+
+function stepSolver() {
+  if (solverDone) return false;
+
+  const r = solverRow;
+  const c = solverCol;
+
+  // reached the exit? — eastWall[endRow][C] was opened, so the mouse is at
+  // col C and the east wall is absent (gap in right boundary)
+  if (r === endRow && c === C && eastWall[r][C] === 0) {
+    solutionPath = solverStack.map(p => ({ ...p }));
+    solverDone   = true;
+    return false;
+  }
+
+  // build a Set of cells currently on the path for fast lookup
+  const onPath = new Set(solverStack.map(p => p.row + ',' + p.col));
+
+  // open neighbours that are not on the current path and not dead ends
+  const dirs = shuffle([
+    { dr:  1, dc:  0 },
+    { dr: -1, dc:  0 },
+    { dr:  0, dc:  1 },
+    { dr:  0, dc: -1 },
+  ]);
+
+  const moves = dirs
+    .filter(({ dr, dc }) => canMove(r, c, dr, dc))
+    .map(({ dr, dc }) => ({ row: r + dr, col: c + dc }))
+    .filter(n => !onPath.has(n.row + ',' + n.col) && !deadCells.has(n.row + ',' + n.col));
+
+  if (moves.length > 0) {
+    // advance to the first valid neighbour
+    const next = moves[0];
+    solverStack.push({ row: next.row, col: next.col });
+    solverRow = next.row;
+    solverCol = next.col;
+  } else {
+    // dead end — mark this cell and backtrack
+    deadCells.add(r + ',' + c);
+    solverStack.pop();
+
+    if (solverStack.length === 0) {
+      // maze has no solution (shouldn't happen for a proper maze)
+      solverDone = true;
+      return false;
+    }
+
+    const prev = solverStack[solverStack.length - 1];
+    solverRow = prev.row;
+    solverCol = prev.col;
+  }
+
+  return true;
+}
+
+// ─── drawing ──────────────────────────────────────────────────────────────────
+
+function drawMaze() {
+  const cs = cellSize;
+  ctx.fillStyle = C_BG;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  // ── cell fills ──────────────────────────────────────────────────────────────
+
+  if (!solverActive && !solverDone) {
+    // generator phase: show visited (dark blue) and stack (lighter blue)
+    const stackSet = new Set(genStack.map(p => p.row + ',' + p.col));
+    for (let r = 1; r <= R; r++) {
+      for (let c = 1; c <= C; c++) {
+        if (!genVisited[r][c]) continue;
+        const { x, y } = cellOrigin(r, c);
+        ctx.fillStyle = stackSet.has(r + ',' + c) ? C_STACK_GEN : C_VISITED;
+        ctx.fillRect(x + 1, y + 1, cs - 1, cs - 1);
+      }
+    }
+  } else {
+    // ── solver phase ────────────────────────────────────────────────────────
+    // Layer 1: dead-end cells → dark red fill
+    for (const key of deadCells) {
+      const [dr, dc] = key.split(',').map(Number);
+      const { x, y } = cellOrigin(dr, dc);
+      ctx.fillStyle = C_DEAD;
+      ctx.fillRect(x + 1, y + 1, cs - 1, cs - 1);
+    }
+
+    // Layer 2: live path cells → dark green fill
+    for (const p of solverStack) {
+      const { x, y } = cellOrigin(p.row, p.col);
+      ctx.fillStyle = C_PATH;
+      ctx.fillRect(x + 1, y + 1, cs - 1, cs - 1);
+    }
+
+    // Layer 3: solution trail (amber, semi-transparent) — shown after solve
+    if (solutionPath) {
+      for (const p of solutionPath) {
+        const { x, y } = cellOrigin(p.row, p.col);
+        ctx.fillStyle = C_SOLUTION + '66';
+        ctx.fillRect(x + 1, y + 1, cs - 1, cs - 1);
+      }
+      // bright amber dot on the exit cell
+      const { x: ex, y: ey } = cellOrigin(endRow, C);
+      ctx.fillStyle = C_SOLUTION;
+      ctx.beginPath();
+      ctx.arc(ex + cs / 2, ey + cs / 2, Math.max(3, cs * 0.28), 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // ── walls ───────────────────────────────────────────────────────────────────
+  ctx.strokeStyle = C_WALL;
+  ctx.lineWidth   = WALL_W;
+  ctx.lineCap     = 'square';
+
+  for (let r = 1; r <= R; r++) {
+    for (let c = 1; c <= C; c++) {
+      const { x, y } = cellOrigin(r, c);
+
+      if (northWall[r][c]) {
+        ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + cs, y); ctx.stroke();
+      }
+      if (eastWall[r][c]) {
+        ctx.beginPath(); ctx.moveTo(x + cs, y); ctx.lineTo(x + cs, y + cs); ctx.stroke();
+      }
+      if (northWall[r - 1][c]) {
+        ctx.beginPath(); ctx.moveTo(x, y + cs); ctx.lineTo(x + cs, y + cs); ctx.stroke();
+      }
+      if (eastWall[r][c - 1]) {
+        ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y + cs); ctx.stroke();
+      }
+    }
+  }
+
+  // ── mouse dot ───────────────────────────────────────────────────────────────
+  const dotRadius = Math.max(3, cs * 0.28);
+
+  if (!genDone) {
+    // generator mouse: amber
+    const { x, y } = cellOrigin(genRow, genCol);
+    ctx.fillStyle = '#f0a500';
+    ctx.beginPath();
+    ctx.arc(x + cs / 2, y + cs / 2, dotRadius, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (solverActive && !solverDone) {
+    // solver mouse: red
+    const { x, y } = cellOrigin(solverRow, solverCol);
+    ctx.fillStyle = C_SOLVER;
+    ctx.beginPath();
+    ctx.arc(x + cs / 2, y + cs / 2, dotRadius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // ── entry / exit portals (always visible once gen is done) ──────────────────
+  if (genDone) {
+    drawPortal('start');
+    drawPortal('end');
+  }
+}
+
+// ─── portal drawing ───────────────────────────────────────────────────────────
+
+function drawPortal(which) {
+  const cs      = cellSize;
+  const isStart = which === 'start';
+  const row     = isStart ? startRow : endRow;
+  const col     = isStart ? 1 : C;
+  const color   = isStart ? C_START : C_END;
+  const { x, y } = cellOrigin(row, col);
+
+  ctx.fillStyle = color + '22';
+  ctx.fillRect(x + 1, y + 1, cs - 2, cs - 2);
+
+  const cy      = y + cs / 2;
+  const aLen    = Math.max(8, PAD - 4);
+  const headLen = Math.max(5, aLen * 0.38);
+  const headW   = Math.max(3, cs * 0.22);
+
+  const x1 = isStart ? x - aLen        : x + cs;
+  const x2 = isStart ? x               : x + cs + aLen;
+
+  ctx.strokeStyle = color;
+  ctx.fillStyle   = color;
+  ctx.lineWidth   = 2;
+  ctx.lineCap     = 'round';
+
+  ctx.beginPath();
+  ctx.moveTo(x1, cy);
+  ctx.lineTo(x2 - (isStart ? -headLen * 0.6 : headLen * 0.6), cy);
+  ctx.stroke();
+
+  ctx.beginPath();
+  if (isStart) {
+    ctx.moveTo(x2, cy);
+    ctx.lineTo(x2 - headLen, cy - headW);
+    ctx.lineTo(x2 - headLen, cy + headW);
+  } else {
+    ctx.moveTo(x2, cy);
+    ctx.lineTo(x2 - headLen, cy - headW);
+    ctx.lineTo(x2 - headLen, cy + headW);
+  }
+  ctx.closePath();
+  ctx.fill();
+
+  ctx.fillStyle    = color;
+  ctx.font         = `${Math.max(9, Math.min(11, cs * 0.35))}px 'Courier New', monospace`;
+  ctx.textAlign    = isStart ? 'left' : 'right';
+  ctx.textBaseline = 'bottom';
+  ctx.fillText(isStart ? 'IN' : 'OUT', isStart ? x1 : x2, cy - headW - 2);
+}
+
+// ─── animation loops ──────────────────────────────────────────────────────────
+
+function animateGenerator() {
+  const spf = Math.max(1, parseInt(inpSpeed.value) || 3);
+  let running = true;
+  for (let i = 0; i < spf && running; i++) running = stepGenerator();
+
+  drawMaze();
+
+  if (!running) {
+    genDone = true;
+    openExits();
+    drawMaze();
+    statusEl.textContent = 'done — press solve';
+    btnSolve.disabled    = false;
+    btnGen.disabled      = false;
+    return;
+  }
+  animId = requestAnimationFrame(animateGenerator);
+}
+
+function animateSolver() {
+  const spf = Math.max(1, parseInt(inpSpeed.value) || 3);
+  let running = true;
+  for (let i = 0; i < spf && running; i++) running = stepSolver();
+
+  drawMaze();
+
+  if (!running) {
+    drawMaze();
+    if (solutionPath) {
+      statusEl.textContent = 'solved! path length: ' + solutionPath.length + ' cells';
+    } else {
+      statusEl.textContent = 'no solution found';
+    }
+    btnGen.disabled   = false;
+    btnSolve.disabled = true;
+    return;
+  }
+  animId = requestAnimationFrame(animateSolver);
+}
+
+// ─── button handlers ──────────────────────────────────────────────────────────
+
+function startGeneration() {
+  if (animId) cancelAnimationFrame(animId);
+
+  const rows = Math.max(3, Math.min(40, parseInt(inpR.value)  || 15));
+  const cols = Math.max(3, Math.min(60, parseInt(inpC.value)  || 20));
+
+  initMaze(rows, cols);
+  drawMaze();
+
+  btnGen.disabled   = true;
+  btnSolve.disabled = true;
+  statusEl.textContent = 'generating…';
+
+  animId = requestAnimationFrame(animateGenerator);
+}
+
+function startSolver() {
+  if (!genDone) return;
+  if (animId) cancelAnimationFrame(animId);
+
+  initSolver();
+  btnSolve.disabled    = true;
+  btnGen.disabled      = true;
+  statusEl.textContent = 'solving…';
+
+  animId = requestAnimationFrame(animateSolver);
+}
+
+btnGen.addEventListener('click', startGeneration);
+btnSolve.addEventListener('click', startSolver);
+btnCycles.addEventListener('click', () => {
+  enableCycles = !enableCycles;
+  btnCycles.textContent = enableCycles ? 'Cycles: ON' : 'Cycles: OFF';
+  btnCycles.classList.toggle('active', enableCycles);
+});
+
+startGeneration();
+</script>
+</body>
+</html>
